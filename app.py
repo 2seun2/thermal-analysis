@@ -14,12 +14,16 @@ with st.sidebar:
     st.header("📏 설계 사양")
     inch = st.slider("TV 크기 (인치)", 32, 85, 55)
     
+    st.subheader("🌡️ 온도 환경 설정")
+    # Cover-Rear의 기본(초기) 온도 설정 기능 추가
+    base_temp = st.number_input("Cover-Rear 초기 온도 (°C)", value=25.0, step=1.0)
+    
     st.subheader("🧪 Cover-Rear 재질")
     mat_type = st.radio("재질 선택", ["Engineering Plastic (ABS/PC)", "Metal (Aluminum/Steel)"])
     mat_k = 0.25 if "Plastic" in mat_type else 50.0
     
     st.subheader("📦 보드 설정")
-    board_heat_temp = st.number_input("보드 발열 온도 (°C)", value=80)
+    board_heat_temp = st.number_input("보드 발열 온도 (°C)", value=80.0)
     bx_rel = st.slider("보드 X 위치 (%)", 0, 100, 50)
     by_rel = st.slider("보드 Y 위치 (%)", 0, 100, 40)
     b_size_mm = st.slider("보드 크기 (mm)", 50, 300, 150)
@@ -36,9 +40,10 @@ scale = 15
 nx, ny = int(tv_w_mm / scale), int(tv_h_mm / scale)
 
 @st.cache_data
-def run_simulation(t_w, t_h, b_heat_t, b_x_r, b_y_r, b_s_mm, c_t, g_d, k_val, s_time):
+def run_simulation(t_w, t_h, b_heat_t, b_x_r, b_y_r, b_s_mm, c_t, g_d, k_val, s_time, b_temp):
     grid_history = []
-    grid = np.zeros((nx, ny))
+    # 0도 대신 사용자가 설정한 초기 온도(base_temp)로 그리드 초기화
+    grid = np.full((nx, ny), float(b_temp))
     
     bx = int(nx * b_x_r / 100); by = int(ny * b_y_r / 100)
     bs = int(b_s_mm / scale)
@@ -54,13 +59,14 @@ def run_simulation(t_w, t_h, b_heat_t, b_x_r, b_y_r, b_s_mm, c_t, g_d, k_val, s_
             grid[1:-1, :-2] + grid[1:-1, 2:] - 4 * center
         )
         grid[bx:bx_e, by:by_e] = b_heat_t
-        grid -= grid * 0.002
+        # 외부 냉각 시에도 초기 온도(b_temp)를 기준으로 평형을 이루도록 수정
+        grid -= (grid - float(b_temp)) * 0.002
         
         if step % 2 == 0: grid_history.append(grid.copy())
             
     return np.array(grid_history)
 
-history = run_simulation(tv_w_mm, tv_h_mm, board_heat_temp, bx_rel, by_rel, b_size_mm, cover_thick, gap_dist, mat_k, sim_time_hr)
+history = run_simulation(tv_w_mm, tv_h_mm, board_heat_temp, bx_rel, by_rel, b_size_mm, cover_thick, gap_dist, mat_k, sim_time_hr, base_temp)
 final_map = history[-1]
 
 # --- 3. 화면 레이아웃 ---
@@ -69,29 +75,23 @@ col_map, col_graph = st.columns([2, 1])
 with col_map:
     st.subheader("🔥 온도 분포 (클릭하여 지점 측정)")
     
-    # 그래프를 이미지로 변환하는 핵심 로직
     fig_m, ax_m = plt.subplots(figsize=(10, 5))
-    im = ax_m.imshow(final_map.T, cmap='hot', origin='lower')
+    # 초기 온도가 반영된 컬러맵 출력
+    im = ax_m.imshow(final_map.T, cmap='hot', origin='lower', vmin=base_temp, vmax=max(board_heat_temp, final_map.max()))
     ax_m.axis('off')
     
-    # 1. 버퍼에 그래프 저장
     buf = io.BytesIO()
     fig_m.savefig(buf, format="png", bbox_inches='tight', pad_inches=0)
     buf.seek(0)
-    
-    # 2. PIL 이미지로 변환
     img = Image.open(buf)
     
-    # 3. 이미지 좌표 출력
     value = streamlit_image_coordinates(img, key="thermal_map")
-    plt.close(fig_m) # 메모리 해제
+    plt.close(fig_m)
 
 with col_graph:
     st.subheader("📈 선택 지점 온도 추이")
     
     if value:
-        # 클릭 좌표 계산 (이미지 크기에 맞게 스케일링)
-        # 이미지 크기가 동적으로 변하므로 좌표 비율을 사용
         click_x = int((value['x'] / img.width) * nx)
         click_y = int(((img.height - value['y']) / img.height) * ny)
         
@@ -105,9 +105,11 @@ with col_graph:
         ax_t.plot(time_axis, point_history, color='cyan', linewidth=2)
         ax_t.set_xlabel("Time (h)"); ax_t.set_ylabel("Temp (°C)")
         ax_t.set_title(f"Position: {click_x*scale}mm, {click_y*scale}mm")
+        # Y축 범위를 초기 온도부터 시작하도록 설정
+        ax_t.set_ylim(base_temp - 5, max(point_history) + 10)
         ax_t.grid(True, alpha=0.2)
         st.pyplot(fig_t)
         
-        st.metric("선택 지점 최종 온도", f"{point_history[-1]:.1f} °C")
+        st.metric("선택 지점 최종 온도", f"{point_history[-1]:.1f} °C", f"{point_history[-1]-base_temp:.1f} °C 상승")
     else:
-        st.info("왼쪽 열지도의 특정 지점을 클릭하면 실시간 온도 상승 그래프가 나타납니다.")
+        st.info("왼쪽 열지도의 특정 지점을 클릭하면 초기 온도부터 시작되는 상승 곡선이 나타납니다.")
