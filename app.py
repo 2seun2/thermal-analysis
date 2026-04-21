@@ -2,74 +2,95 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 1. 재질 및 부품 데이터 (선택 가능하도록 구성)
-MATERIAL_DATA = {
-    "Plastic (ABS)": {"k": 0.25, "density": 1050},
-    "Aluminum 6061": {"k": 167.0, "density": 2700},
-    "Steel (SECC)": {"k": 50.0, "density": 7850},
-    "PCB (FR-4)": {"k": 0.3, "density": 1850}
-}
+st.set_page_config(page_title="TV Thermal Mech-Design", layout="wide")
+st.title("📺 TV 내부 공기 대류 및 기구 반영 열해석")
 
-st.set_page_config(page_title="TV Thermal Analyzer", layout="wide")
-st.title("📺 TV 내부 부품별 열해석 시뮬레이터")
-
-# 2. 사이드바 입력창
+# --- 사이드바: 기구 및 물리 설정 ---
 with st.sidebar:
-    st.header("🛠 설정 파라미터")
+    st.header("📏 기구 설계 사양")
     inch = st.slider("TV 크기 (인치)", 32, 85, 55)
     
-    st.subheader("📍 보드(Board) 설정")
+    st.subheader("📦 보드 설정")
     bx_rel = st.slider("보드 X 위치 (%)", 0, 100, 50)
     by_rel = st.slider("보드 Y 위치 (%)", 0, 100, 40)
-    heat_w = st.number_input("보드 발열량 (W)", value=25)
+    b_size = st.slider("보드 크기 (mm)", 50, 300, 150)
+    heat_w = st.number_input("보드 발열량 (W)", value=30)
     
-    st.subheader("🧪 재질 및 환경")
-    mat_choice = st.selectbox("TV 케이스 재질 선택", list(MATERIAL_DATA.keys()))
-    k_val = MATERIAL_DATA[mat_choice]["k"]
-    sim_hours = st.number_input("가동 시간 (hour)", value=1)
+    st.subheader("🛡️ Cover-Rear 설정")
+    cover_thick = st.slider("Cover 두께 (mm)", 1.0, 5.0, 2.0, step=0.5)
+    gap_dist = st.slider("Board-Cover 간격 (Gap, mm)", 1, 50, 10)
+    
+    st.subheader("🌡️ 환경 계수")
+    # 대류 열전달 계수 (공기 자연대류 보통 5~25)
+    h_coeff = st.slider("대류 계수 (h, W/m²K)", 5, 50, 10)
 
-# 3. 열해석 엔진 (FDM 방식)
-def run_thermal_analysis():
-    # TV 규격 변환 (mm)
-    width = int(inch * 25.4 * 0.87 / 10) # 계산 속도를 위해 10mm 격자
+# --- 열해석 엔진 ---
+def run_advanced_sim():
+    # 격자 설정 (10mm 단위)
+    width = int(inch * 25.4 * 0.87 / 10)
     height = int(inch * 25.4 * 0.49 / 10)
+    grid = np.full((width, height), 25.0) # 초기 온도 25도
     
-    # 초기 상태 (상온 25도)
-    grid = np.full((width, height), 25.0)
+    # 보드 좌표 및 크기 계산
+    bx = int(width * bx_rel / 100)
+    by = int(height * by_rel / 100)
+    bs = int(b_size / 10)
     
-    # 보드 위치 및 크기 (고정 크기 가정)
-    bx, by = int(width * bx_rel / 100), int(height * by_rel / 100)
-    bw, bh = 5, 5 # 50mm x 50mm 보드
+    # 물리 상수 계산
+    # Gap이 좁을수록 전도에 가까워지고, 넓을수록 대류 효율 변화 (단순화 모델)
+    thermal_resistance_gap = gap_dist / (0.026 * 1.0) # 공기 열전도도 0.026 가정
+    eff_alpha = (1.0 / (thermal_resistance_gap + (cover_thick / 0.2))) * 0.5
     
-    # 열확산 계수 (alpha) 단순화 모델
-    alpha = k_val * 0.1
-    
-    # 시간 스텝 반복
-    for _ in range(200): # 시뮬레이션 반복 횟수
-        # 주변 전도 계산
-        grid[1:-1, 1:-1] += alpha * (
+    # 시뮬레이션 루프 (반복 계산으로 평형 온도 도달)
+    for _ in range(150):
+        # 1. 주변 전도 (2D 확산)
+        center = grid[1:-1, 1:-1]
+        grid[1:-1, 1:-1] = center + eff_alpha * (
             grid[:-2, 1:-1] + grid[2:, 1:-1] + 
-            grid[1:-1, :-2] + grid[1:-1, 2:] - 4 * grid[1:-1, 1:-1]
+            grid[1:-1, :-2] + grid[1:-1, 2:] - 4 * center
         )
-        # 보드 발열 적용
-        grid[bx:bx+bw, by:by+bh] += (heat_w * 0.05)
         
-    return grid
+        # 2. 보드 영역 발열 주입
+        # Gap이 작을수록 보드 열이 커버에 더 직접적으로 전달됨
+        heat_impact = (heat_w / (gap_dist * 0.5)) * 0.2
+        grid[bx:bx+bs, by:by+bs] += heat_impact
+        
+        # 3. 외부 대류 냉각 (h 계수 반영)
+        grid -= (grid - 25.0) * (h_coeff * 0.0001)
 
-# 4. 결과 출력
-if st.button("🔥 열해석 실행"):
-    with st.spinner('계산 중...'):
-        result_map = run_thermal_analysis()
+    return grid, width, height
+
+# --- 결과 시각화 ---
+if st.button("🚀 해석 시뮬레이션 시작"):
+    result, w, h = run_advanced_sim()
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.subheader("🔥 Rear-Cover 표면 온도 분포")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        im = ax.imshow(result.T, cmap='magma', origin='lower', extent=[0, w*10, 0, h*10])
+        plt.colorbar(im, label="Temp (°C)")
+        ax.set_xlabel("Width (mm)")
+        ax.set_ylabel("Height (mm)")
+        st.pyplot(fig)
         
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            fig, ax = plt.subplots()
-            im = ax.imshow(result_map.T, cmap='jet', origin='lower')
-            plt.colorbar(im, label="Temp (°C)")
-            ax.set_title(f"{inch} inch TV Thermal Map ({mat_choice})")
-            st.pyplot(fig)
+    with col2:
+        st.subheader("📊 해석 데이터")
+        max_t = np.max(result)
+        st.metric("최고 온도 (Hotspot)", f"{max_t:.1f} °C")
+        
+        # 설계 가이드 메시지
+        if max_t > 65:
+            st.error("⚠️ 경고: 커버 온도가 너무 높습니다. Gap을 키우거나 두께를 조절하세요.")
+        elif max_t > 45:
+            st.warning("ℹ️ 주의: 온도가 다소 높습니다. 방열 구멍 검토가 필요할 수 있습니다.")
+        else:
+            st.success("✅ 안전: 현재 기구 설계상 온도가 안정적입니다.")
             
-        with col2:
-            st.metric("최고 온도", f"{np.max(result_map):.1f} °C")
-            st.metric("평균 온도", f"{np.mean(result_map):.1f} °C")
-            st.success("해석이 완료되었습니다.")
+        st.info(f"""
+        **설계 조건:**
+        - Gap: {gap_dist}mm
+        - Thickness: {cover_thick}mm
+        - 대류냉각 반영됨
+        """)
